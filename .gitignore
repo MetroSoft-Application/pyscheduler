@@ -9,4 +9,5 @@
 *.spec
 *.log
 .vscode
-# /data/history*
+tasks.json
+/data/history*
