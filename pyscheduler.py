@@ -88,6 +88,10 @@ def main() -> int:
             tray.stop()
         except Exception:
             pass
+        try:
+            storage.close()
+        except Exception:
+            pass
 
     return 0
 
