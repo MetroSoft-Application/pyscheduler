@@ -1,0 +1,12 @@
+/build
+/dist
+# *.txt
+!requirements.txt
+*/__pycache__
+*.pyc
+/cs
+*.tmp
+*.spec
+*.log
+.vscode
+history*
