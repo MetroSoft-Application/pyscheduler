@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 RUNTIME_OPTIONS = ('auto', 'powershell', 'python', 'command')
-SCHEDULE_TYPES = ('interval', 'daily', 'weekly', 'monthly', 'once')
+SCHEDULE_TYPES = ('interval', 'daily', 'weekly', 'monthly', 'once', 'chain')
 # 0=月曜, 6=日曜 (Python weekday() と同じ)
 WEEKDAY_LABELS = ['月', '火', '水', '木', '金', '土', '日']
 
@@ -103,5 +103,17 @@ def schedule_summary(schedule: dict[str, Any]) -> str:
 
     if t == 'once':
         return f"1回 {schedule.get('run_at', '-')}"
+
+    if t == 'chain':
+        after_name = schedule.get('after_task_name') or schedule.get('after_task_id', '-')
+        condition = schedule.get('on_condition', 'success')
+        condition_label = {'success': '正常終了時', 'failed': 'エラー終了時', 'any': '完了時'}.get(
+            condition, condition
+        )
+        fallback = str(schedule.get('fallback_time', '')).strip()
+        label = f'チェーン: {after_name} ({condition_label})'
+        if fallback:
+            label += f' / フォールバック {fallback}'
+        return label
 
     return t

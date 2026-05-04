@@ -35,7 +35,12 @@ def _optional_int(val: str, label: str) -> int | None:
 class TaskDialog(tk.Toplevel):
     """タスク追加・編集ダイアログ"""
 
-    def __init__(self, master: tk.Misc, task: TaskDefinition | None = None) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        task: TaskDefinition | None = None,
+        tasks: list[TaskDefinition] | None = None,
+    ) -> None:
         super().__init__(master)
         self.title('タスク編集' if task else '新規タスク')
         self.geometry('860x720')
@@ -45,6 +50,12 @@ class TaskDialog(tk.Toplevel):
         self.resizable(True, True)
         self.result: TaskDefinition | None = None
         self._task = task
+
+        # 連鎖元候補リスト(自分自身は除外)
+        self._chain_tasks = [
+            t for t in (tasks or []) if not task or t.id != task.id
+        ]
+        self._chain_task_name_to_id: dict[str, str] = {t.name: t.id for t in self._chain_tasks}
 
         # ---- 変数初期化 ----
         sched = (task.schedule if task else None) or {'type': 'interval'}
@@ -84,6 +95,18 @@ class TaskDialog(tk.Toplevel):
         self._monthly_day_var = tk.StringVar(value=str(sched.get('day', 1)))
         self._once_var = tk.StringVar(value=sched.get('run_at', ''))
 
+        # chain 設定変数
+        current_chain_name = ''
+        if sched.get('after_task_id'):
+            current_chain_name = (
+                sched.get('after_task_name')
+                or next((t.name for t in self._chain_tasks if t.id == sched['after_task_id']), '')
+                or sched['after_task_id']
+            )
+        self._chain_task_var = tk.StringVar(value=current_chain_name)
+        self._chain_fallback_var = tk.StringVar(value=str(sched.get('fallback_time', '')))
+        self._chain_condition_var = tk.StringVar(value=str(sched.get('on_condition', 'success')))
+
         self._build_ui()
         self._on_schedule_type_changed()
 
@@ -104,7 +127,10 @@ class TaskDialog(tk.Toplevel):
         row = 0
         ttk.Label(basic, text='タスク名:').grid(row=row, column=0, sticky='e', padx=4, pady=3)
         ttk.Entry(basic, textvariable=self._name_var).grid(
-            row=row, column=1, columnspan=3, sticky='ew', pady=3
+            row=row, column=1, columnspan=2, sticky='ew', pady=3
+        )
+        ttk.Checkbutton(basic, text='有効', variable=self._enabled_var).grid(
+            row=row, column=3, sticky='w', padx=8
         )
 
         row += 1
@@ -143,10 +169,6 @@ class TaskDialog(tk.Toplevel):
             row=0, column=1, padx=(4, 0)
         )
 
-        ttk.Checkbutton(basic, text='有効', variable=self._enabled_var).grid(
-            row=0, column=3, sticky='w', padx=8
-        )
-
         # 中部: スケジュール
         sched_outer = ttk.LabelFrame(outer, text='スケジュール', padding=8)
         sched_outer.pack(fill='x', pady=(0, 6))
@@ -157,7 +179,7 @@ class TaskDialog(tk.Toplevel):
         cb = ttk.Combobox(
             type_frame,
             textvariable=self._schedule_type_var,
-            values=['interval', 'daily', 'weekly', 'monthly', 'once'],
+            values=['interval', 'daily', 'weekly', 'monthly', 'once', 'chain'],
             state='readonly',
             width=12,
         )
@@ -236,6 +258,8 @@ class TaskDialog(tk.Toplevel):
             self._build_time_frame(f, show_weekdays=False, show_monthly_day=True)
         elif t == 'once':
             self._build_once_frame(f)
+        elif t == 'chain':
+            self._build_chain_frame(f)
 
     def _spinbox(self, parent, var: tk.StringVar, label: str, _from: int, to: int, width: int = 6):
         ttk.Label(parent, text=label).pack(side='left', padx=(6, 2))
@@ -285,6 +309,52 @@ class TaskDialog(tk.Toplevel):
         ttk.Label(row, text='実行日時:').pack(side='left', padx=(0, 4))
         ttk.Entry(row, textvariable=self._once_var, width=22).pack(side='left')
         ttk.Label(row, text='(例: 2026-04-30 09:00:00)').pack(side='left', padx=6)
+
+    def _build_chain_frame(self, f: ttk.Frame) -> None:
+        task_names = [t.name for t in self._chain_tasks]
+
+        row1 = ttk.Frame(f)
+        row1.pack(fill='x', pady=4)
+        ttk.Label(row1, text='前提タスク:').pack(side='left', padx=(0, 4))
+        cb = ttk.Combobox(
+            row1,
+            textvariable=self._chain_task_var,
+            values=task_names,
+            state='readonly' if task_names else 'disabled',
+            width=30,
+        )
+        cb.pack(side='left')
+        if not task_names:
+            ttk.Label(row1, text='(登録済みタスクがありません)', foreground='gray').pack(
+                side='left', padx=6
+            )
+
+        row2 = ttk.Frame(f)
+        row2.pack(fill='x', pady=4)
+        ttk.Label(row2, text='実行条件:').pack(side='left', padx=(0, 4))
+        ttk.Combobox(
+            row2,
+            textvariable=self._chain_condition_var,
+            values=['success', 'failed', 'any'],
+            state='readonly',
+            width=12,
+        ).pack(side='left')
+        ttk.Label(
+            row2,
+            text='  success=正常終了時  /  failed=エラー終了時  /  any=完了時',
+            foreground='gray',
+        ).pack(side='left', padx=4)
+
+        row3 = ttk.Frame(f)
+        row3.pack(fill='x', pady=4)
+        ttk.Label(row3, text='フォールバック時刻:').pack(side='left', padx=(0, 4))
+        ttk.Entry(row3, textvariable=self._chain_fallback_var, width=12).pack(side='left')
+        ttk.Label(row3, text='(例: 09:00 または 09:00:00、省略可)').pack(side='left', padx=6)
+        ttk.Label(
+            f,
+            text='前提タスクが条件を満たしたとき、または指定時刻になったとき(どちらか早い方)に実行します。',
+            foreground='gray',
+        ).pack(anchor='w', padx=2, pady=(2, 0))
 
     # ------------------------------------------------------------------ イベント
 
@@ -413,5 +483,35 @@ class TaskDialog(tk.Toplevel):
             except ValueError:
                 raise ValueError('実行日時の形式が正しくありません。(例: 2026-04-30 09:00:00)')
             sched['run_at'] = run_at
+
+        elif t == 'chain':
+            after_task_name = self._chain_task_var.get().strip()
+            if not after_task_name:
+                raise ValueError('chain の場合は前提タスクを選択してください。')
+            after_task_id = self._chain_task_name_to_id.get(after_task_name, '')
+            if not after_task_id:
+                raise ValueError('選択されたタスクが見つかりません。')
+            sched['after_task_id'] = after_task_id
+            sched['after_task_name'] = after_task_name
+
+            condition = self._chain_condition_var.get().strip()
+            if condition not in ('success', 'failed', 'any'):
+                condition = 'success'
+            sched['on_condition'] = condition
+
+            fallback_time = self._chain_fallback_var.get().strip()
+            if fallback_time:
+                try:
+                    parts = fallback_time.split(':')
+                    h = int(parts[0])
+                    m = int(parts[1]) if len(parts) > 1 else 0
+                    s = int(parts[2]) if len(parts) > 2 else 0
+                    if not (0 <= h <= 23 and 0 <= m <= 59 and 0 <= s <= 59):
+                        raise ValueError()
+                    sched['fallback_time'] = fallback_time
+                except (ValueError, IndexError):
+                    raise ValueError(
+                        'フォールバック時刻の形式が正しくありません。(例: 09:00 または 09:00:00)'
+                    )
 
         return sched

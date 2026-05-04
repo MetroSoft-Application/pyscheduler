@@ -628,7 +628,7 @@ class GanttWindow(tk.Toplevel):
         if task is None:
             return
 
-        dlg = TaskDialog(self, task=task)
+        dlg = TaskDialog(self, task=task, tasks=list(self._task_map.values()))
         self.wait_window(dlg)
         if dlg.result is None:
             return

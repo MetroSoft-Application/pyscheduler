@@ -528,7 +528,7 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------ ハンドラ
 
     def _on_add(self) -> None:
-        dlg = TaskDialog(self)
+        dlg = TaskDialog(self, tasks=self._tasks_cache)
         self.wait_window(dlg)
         if dlg.result:
             self._storage.save_task(dlg.result)
@@ -539,7 +539,7 @@ class MainWindow(tk.Tk):
         task = self._selected_task()
         if task is None:
             return
-        dlg = TaskDialog(self, task=task)
+        dlg = TaskDialog(self, task=task, tasks=self._tasks_cache)
         self.wait_window(dlg)
         if dlg.result:
             self._storage.save_task(dlg.result)
@@ -569,7 +569,7 @@ class MainWindow(tk.Tk):
             created_at=now,
             updated_at=now,
         )
-        dlg = TaskDialog(self, task=copied)
+        dlg = TaskDialog(self, task=copied, tasks=self._tasks_cache)
         self.wait_window(dlg)
         if dlg.result:
             self._storage.save_task(dlg.result)

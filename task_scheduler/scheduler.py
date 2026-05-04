@@ -51,6 +51,8 @@ class TaskScheduler:
         self._thread_lock = threading.Lock()
 
     def start(self) -> None:
+        self._executor.on_task_success = self._on_task_success
+        self._executor.on_task_complete = self._on_task_complete
         for task in self._storage.list_tasks():
             if task.enabled:
                 self._add_job(task)
@@ -83,12 +85,13 @@ class TaskScheduler:
         return True
 
     def get_next_run_time(self, task_id: str) -> str | None:
-        try:
-            job = self._scheduler.get_job(task_id)
-            if job and job.next_run_time:
-                return job.next_run_time.strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            pass
+        for jid in (task_id, f'{task_id}__fallback'):
+            try:
+                job = self._scheduler.get_job(jid)
+                if job and job.next_run_time:
+                    return job.next_run_time.strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
         return None
 
     def preview_schedule(
@@ -146,6 +149,9 @@ class TaskScheduler:
         last_history: RunHistorySummary | None,
         limit_per_task: int,
     ) -> list[ScheduleOccurrence]:
+        if task.schedule.get('type') == 'chain':
+            return self._preview_chain_schedule(task, window_start, window_end, last_history, limit_per_task)
+
         trigger = self._make_trigger(task)
         if trigger is None:
             return []
@@ -184,6 +190,22 @@ class TaskScheduler:
         return occurrences
 
     def _add_job(self, task: TaskDefinition) -> None:
+        if task.schedule.get('type') == 'chain':
+            # chain はイベント驱動のため APScheduler には登録しない
+            # fallback_time が設定されている場合はデイリークロンも追加する
+            fallback_time = str(task.schedule.get('fallback_time', '')).strip()
+            if fallback_time:
+                trigger = self._make_fallback_trigger(fallback_time)
+                if trigger is not None:
+                    self._scheduler.add_job(
+                        func=self._run_task,
+                        trigger=trigger,
+                        args=[task.id],
+                        id=f'{task.id}__fallback',
+                        replace_existing=True,
+                    )
+            return
+
         trigger = self._make_trigger(task)
         if trigger is None:
             return
@@ -196,10 +218,11 @@ class TaskScheduler:
         )
 
     def _remove_job(self, task_id: str) -> None:
-        try:
-            self._scheduler.remove_job(task_id)
-        except Exception:
-            pass
+        for jid in (task_id, f'{task_id}__fallback'):
+            try:
+                self._scheduler.remove_job(jid)
+            except Exception:
+                pass
 
     def _run_task(self, task_id: str) -> None:
         """APScheduler から呼ばれるジョブ本体"""
@@ -288,3 +311,94 @@ class TaskScheduler:
                 return None
 
         return None
+
+    def _on_task_success(self, task_id: str) -> None:
+        """後方互換のため残存。実処理は _on_task_complete が担う。"""
+        pass
+
+    def _on_task_complete(self, task_id: str, final_status: str) -> None:
+        """あるタスクが完了したとき、on_condition に合致するチェーンタスクを起動する"""
+        # 失敗とみなすステータス
+        _FAILED_STATUSES = frozenset({'failed', 'timeout', 'unknown_exit'})
+
+        for task in self._storage.list_tasks():
+            if not task.enabled:
+                continue
+            sched = task.schedule
+            if sched.get('type') != 'chain':
+                continue
+            if sched.get('after_task_id') != task_id:
+                continue
+
+            condition = str(sched.get('on_condition', 'success'))
+            matched = (
+                condition == 'any'
+                or (condition == 'success' and final_status == 'success')
+                or (condition == 'failed' and final_status in _FAILED_STATUSES)
+            )
+            if not matched:
+                continue
+
+            t = threading.Thread(
+                target=self._executor.execute,
+                args=(task, 'chain'),
+                name=f'TaskWorker-chain-{task.id}',
+                daemon=True,
+            )
+            t.start()
+
+    def _preview_chain_schedule(
+        self,
+        task: TaskDefinition,
+        window_start: datetime,
+        window_end: datetime,
+        last_history: RunHistorySummary | None,
+        limit_per_task: int,
+    ) -> list[ScheduleOccurrence]:
+        """chain タイプのプレビュー: fallback_time がある場合のみ表示する"""
+        fallback_time = str(task.schedule.get('fallback_time', '')).strip()
+        if not fallback_time:
+            return []
+        trigger = self._make_fallback_trigger(fallback_time)
+        if trigger is None:
+            return []
+
+        duration_seconds, _ = self._estimate_task_duration(task, last_history)
+        occurrences: list[ScheduleOccurrence] = []
+        previous_fire_time = None
+        search_time = window_start
+        for _ in range(max(1, limit_per_task)):
+            fire_time = trigger.get_next_fire_time(previous_fire_time, search_time)
+            if fire_time is None:
+                break
+            fire_time = self._normalize_preview_datetime(fire_time)
+            if fire_time >= window_end:
+                break
+            end_time = min(fire_time + timedelta(seconds=duration_seconds), window_end)
+            occurrences.append(
+                ScheduleOccurrence(
+                    task_id=task.id,
+                    task_name=task.name,
+                    schedule_type='chain',
+                    start_time=fire_time,
+                    end_time=end_time,
+                    duration_seconds=duration_seconds,
+                    estimated=True,
+                    enabled=task.enabled,
+                )
+            )
+            previous_fire_time = fire_time
+            search_time = fire_time + timedelta(microseconds=1)
+        return occurrences
+
+    def _make_fallback_trigger(self, fallback_time: str):
+        """フォールバック時刻文字列(HH:MM または HH:MM:SS)から CronTrigger を生成"""
+        from apscheduler.triggers.cron import CronTrigger
+        try:
+            parts = fallback_time.split(':')
+            hour = int(parts[0])
+            minute = int(parts[1]) if len(parts) > 1 else 0
+            second = int(parts[2]) if len(parts) > 2 else 0
+            return CronTrigger(hour=hour, minute=minute, second=second)
+        except (ValueError, IndexError):
+            return None
