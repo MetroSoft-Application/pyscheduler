@@ -235,7 +235,7 @@ class GanttWindow(tk.Toplevel):
     def _load_chart_data(self, token: int) -> None:
         try:
             tasks = self._storage.list_tasks()
-            last_history = self._storage.get_last_history_all(include_legacy=True)
+            last_history = self._storage.get_last_history_all()
             span = _RANGE_OPTIONS.get(self._range_var.get(), timedelta(days=7))
 
             now = datetime.now()

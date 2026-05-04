@@ -242,13 +242,11 @@ class HistoryWindow(tk.Toplevel):
             if self._task is None:
                 entries = self._storage.list_all_recent_history(
                     limit=self._limit,
-                    include_legacy=True,
                 )
             else:
                 entries = self._storage.list_history(
                     self._task.id,
                     limit=self._limit,
-                    include_legacy=True,
                 )
             self._run_on_ui_thread(lambda: self._apply_entries(token, entries))
         except Exception as exc:

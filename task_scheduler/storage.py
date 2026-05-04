@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -10,13 +9,6 @@ from typing import Any
 from .models import RunHistoryDetail, RunHistoryEntry, RunHistorySummary, TaskDefinition
 
 SCHEMA_VERSION = 1
-
-# レガシー JSONL 読み取り用（マイグレーション時のみ使用）
-_HISTORY_STDOUT_FIELD_RE = re.compile(r',\s*"stdout"\s*:')
-_HISTORY_DURATION_FIELD_RE = re.compile(r'"duration_seconds"\s*:')
-_LEGACY_SUMMARY_SCAN_BYTES = 64 * 1024
-_LEGACY_ID_SCAN_BYTES = 4 * 1024
-_LEGACY_LARGE_LINE_THRESHOLD = 256 * 1024
 
 _SQL_CREATE_META = """
 CREATE TABLE IF NOT EXISTS db_meta (
@@ -62,10 +54,6 @@ class Storage:
     def __init__(self, data_dir: Path) -> None:
         self._tasks_path = data_dir / 'tasks.json'
         self._db_path = data_dir / 'history.db'
-        # マイグレーション元ディレクトリ（既存データ読み取り専用）
-        self._history_dir = data_dir / 'history'
-        self._history_summary_dir = data_dir / 'history_summary'
-        self._history_detail_dir = data_dir / 'history_detail'
         self._lock = threading.RLock()
         data_dir.mkdir(parents=True, exist_ok=True)
         if not self._tasks_path.exists():
@@ -77,7 +65,6 @@ class Storage:
         )
         self._conn.row_factory = sqlite3.Row
         self._setup_db()
-        self._migrate_jsonl_if_needed()
 
     def close(self) -> None:
         """DB 接続を閉じる。アプリ終了時に呼び出すこと。"""
@@ -162,124 +149,6 @@ class Storage:
             self._conn.execute(_SQL_IDX_TASK)
             self._conn.execute(_SQL_IDX_ALL)
 
-    # ---- マイグレーション (JSONL -> SQLite、初回のみ) ----
-
-    def _migrate_jsonl_if_needed(self) -> None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT value FROM db_meta WHERE key = 'jsonl_migration_done'"
-            ).fetchone()
-            if row:
-                return
-
-            summaries: list[tuple] = []
-            details: list[tuple] = []
-
-            # history_summary/*.jsonl から移行
-            if self._history_summary_dir.exists():
-                for p in self._history_summary_dir.glob('*.jsonl'):
-                    self._collect_summary_jsonl(p, summaries)
-
-            # history_detail/*.json から移行
-            if self._history_detail_dir.exists():
-                for p in self._history_detail_dir.glob('*.json'):
-                    self._collect_detail_json(p, details)
-
-            # legacy history/*.jsonl から移行（大きな行はサマリーのみ）
-            if self._history_dir.exists():
-                for p in self._history_dir.glob('*.jsonl'):
-                    self._collect_legacy_jsonl(p, summaries, details)
-
-            self._conn.execute('BEGIN')
-            self._conn.executemany(
-                """INSERT OR IGNORE INTO history_summaries
-                   (id, task_id, task_name, started_at, finished_at, status,
-                    exit_code, duration_seconds, trigger, attempt_count,
-                    has_stdout, has_stderr)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                summaries,
-            )
-            self._conn.executemany(
-                'INSERT OR IGNORE INTO history_details (history_id, stdout, stderr) VALUES (?,?,?)',
-                details,
-            )
-            self._conn.execute(
-                "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('jsonl_migration_done', '1')"
-            )
-            self._conn.execute('COMMIT')
-
-    def _collect_summary_jsonl(self, path: Path, out: list[tuple]) -> None:
-        try:
-            with open(path, encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                        out.append(self._summary_dict_to_tuple(d))
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        pass
-        except OSError:
-            pass
-
-    def _collect_detail_json(self, path: Path, out: list[tuple]) -> None:
-        history_id = path.stem
-        try:
-            d = json.loads(path.read_text(encoding='utf-8', errors='replace'))
-            out.append((history_id, str(d.get('stdout', '')), str(d.get('stderr', ''))))
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    def _collect_legacy_jsonl(
-        self,
-        path: Path,
-        summaries: list[tuple],
-        details: list[tuple],
-    ) -> None:
-        try:
-            with open(path, encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    stripped = line.rstrip('\r\n')
-                    if not stripped:
-                        continue
-                    if len(stripped) <= _LEGACY_LARGE_LINE_THRESHOLD:
-                        # 小さい行: 全フィールドをパース
-                        try:
-                            d = json.loads(stripped)
-                            summaries.append(self._summary_dict_to_tuple(d))
-                            stdout = str(d.get('stdout', ''))
-                            stderr = str(d.get('stderr', ''))
-                            if stdout or stderr:
-                                details.append((str(d['id']), stdout, stderr))
-                        except (json.JSONDecodeError, KeyError, ValueError):
-                            pass
-                    else:
-                        # 大きい行: サマリーフィールドのみ正規表現で抽出
-                        prefix = stripped[:_LEGACY_SUMMARY_SCAN_BYTES]
-                        suffix = stripped[-_LEGACY_SUMMARY_SCAN_BYTES:]
-                        summary = self._extract_legacy_summary_parts(prefix, suffix)
-                        if summary is not None:
-                            summaries.append(self._summary_to_tuple(summary))
-        except OSError:
-            pass
-
-    def _extract_legacy_summary_parts(
-        self,
-        prefix_text: str,
-        suffix_text: str,
-    ) -> RunHistorySummary | None:
-        stdout_match = _HISTORY_STDOUT_FIELD_RE.search(prefix_text)
-        duration_match = _HISTORY_DURATION_FIELD_RE.search(suffix_text)
-        if stdout_match is None or duration_match is None:
-            return None
-        try:
-            prefix = json.loads(prefix_text[:stdout_match.start()] + '}')
-            suffix = json.loads('{' + suffix_text[duration_match.start():])
-        except (json.JSONDecodeError, ValueError):
-            return None
-        return self._history_summary_from_dict({**prefix, **suffix, 'has_stdout': True, 'has_stderr': True})
-
     # ---- 実行履歴 ----
 
     def append_history(self, entry: RunHistoryEntry) -> None:
@@ -320,7 +189,6 @@ class Storage:
         self,
         task_id: str,
         limit: int = 100,
-        include_legacy: bool = False,
     ) -> list[RunHistorySummary]:
         with self._lock:
             rows = self._conn.execute(
@@ -332,7 +200,7 @@ class Storage:
             ).fetchall()
         return [self._summary_from_row(row) for row in rows]
 
-    def get_last_history_all(self, include_legacy: bool = False) -> dict[str, RunHistorySummary]:
+    def get_last_history_all(self) -> dict[str, RunHistorySummary]:
         """全タスクの最終実行履歴を {task_id: RunHistorySummary} で一括返却する"""
         with self._lock:
             rows = self._conn.execute(
@@ -350,7 +218,6 @@ class Storage:
     def list_all_recent_history(
         self,
         limit: int = 50,
-        include_legacy: bool = False,
     ) -> list[RunHistorySummary]:
         """全タスクの実行履歴を開始時刻の降順で返す"""
         with self._lock:
@@ -436,33 +303,6 @@ class Storage:
             stderr=stderr,
         )
 
-    # ---- マイグレーション用ヘルパー ----
-
-    def _summary_dict_to_tuple(self, d: dict[str, Any]) -> tuple:
-        return (
-            str(d['id']),
-            str(d['task_id']),
-            str(d.get('task_name', '')),
-            str(d['started_at']),
-            d.get('finished_at'),
-            str(d.get('status', 'unknown')),
-            d.get('exit_code'),
-            d.get('duration_seconds'),
-            str(d.get('trigger', 'scheduler')),
-            int(d.get('attempt_count', 1)),
-            1 if (bool(d.get('has_stdout')) or bool(d.get('stdout'))) else 0,
-            1 if (bool(d.get('has_stderr')) or bool(d.get('stderr'))) else 0,
-        )
-
-    def _summary_to_tuple(self, s: RunHistorySummary) -> tuple:
-        return (
-            s.id, s.task_id, s.task_name or '',
-            s.started_at, s.finished_at, s.status,
-            s.exit_code, s.duration_seconds, s.trigger, s.attempt_count,
-            1 if s.has_stdout else 0,
-            1 if s.has_stderr else 0,
-        )
-
     # ---- 変換ヘルパー ----
 
     def _task_to_dict(self, task: TaskDefinition) -> dict[str, Any]:
@@ -503,18 +343,4 @@ class Storage:
             updated_at=d.get('updated_at', ''),
         )
 
-    def _history_summary_from_dict(self, d: dict[str, Any]) -> RunHistorySummary:
-        return RunHistorySummary(
-            id=d['id'],
-            task_id=d['task_id'],
-            task_name=d.get('task_name', ''),
-            started_at=d['started_at'],
-            finished_at=d.get('finished_at'),
-            status=d.get('status', 'unknown'),
-            exit_code=d.get('exit_code'),
-            duration_seconds=d.get('duration_seconds'),
-            trigger=d.get('trigger', 'scheduler'),
-            attempt_count=int(d.get('attempt_count', 1)),
-            has_stdout=bool(d.get('has_stdout')) or bool(d.get('stdout')),
-            has_stderr=bool(d.get('has_stderr')) or bool(d.get('stderr')),
-        )
+

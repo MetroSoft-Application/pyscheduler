@@ -78,6 +78,11 @@ class MainWindow(tk.Tk):
     def set_quit_callback(self, cb: Callable[[], None]) -> None:
         self._on_quit = cb
 
+    def _on_quit_click(self) -> None:
+        if messagebox.askyesno('終了確認', 'アプリケーションを終了しますか？', default='no'):
+            if self._on_quit:
+                self._on_quit()
+
     def show_window(self) -> None:
         """トレイから呼ばれる: ウィンドウを前面に表示する"""
         self.run_on_ui_thread(self._do_show)
@@ -136,6 +141,9 @@ class MainWindow(tk.Tk):
         self._btn_history = btn('履歴/ログ', self._on_history)
         self._btn_history_all = btn('全体履歴', self._on_history_all, width=10)
         self._btn_gantt = btn('ガント', self._on_gantt, width=8)
+        ttk.Separator(tb, orient='vertical').pack(side='left', fill='y', padx=4)
+        self._btn_quit = btn('終了', self._on_quit_click, width=6)
+        self._btn_quit.pack_configure(side='right', padx=(2, 4))
 
         # ステータスバー（最下部に先に配置）
         self._status_var = tk.StringVar(value='準備完了')
