@@ -48,7 +48,7 @@ class MainWindow(tk.Tk):
         scheduler: TaskScheduler,
     ) -> None:
         super().__init__()
-        self.title('タスクスケジューラ V2')
+        self.title('pyscheduler')
         self.geometry('960x680')
         self.minsize(720, 480)
 

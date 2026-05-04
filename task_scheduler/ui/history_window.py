@@ -4,7 +4,6 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 from typing import TYPE_CHECKING, Callable
 
 from ..models import RunHistoryDetail, RunHistorySummary, TaskDefinition
@@ -30,6 +29,73 @@ _STATUS_TAGS: dict[str, str] = {
     'killed': 'killed',
     'unknown_exit': 'unknown',
 }
+
+
+class _LineNumberedText(ttk.Frame):
+    """行番号ガターを持つテキスト表示ウィジェット"""
+
+    def __init__(self, master: tk.Misc, **kwargs) -> None:
+        super().__init__(master)
+        vsb = ttk.Scrollbar(self, orient='vertical')
+        hsb = ttk.Scrollbar(self, orient='horizontal')
+        self._lineno = tk.Text(
+            self,
+            width=4,
+            padx=4,
+            state='disabled',
+            cursor='arrow',
+            background='#f0f0f0',
+            foreground='#888888',
+            relief='flat',
+            wrap='none',
+            takefocus=False,
+        )
+        self._text = tk.Text(
+            self,
+            yscrollcommand=self._sync_scroll,
+            xscrollcommand=hsb.set,
+            **kwargs,
+        )
+        vsb.configure(command=self._yview)
+        hsb.configure(command=self._text.xview)
+        self._lineno.grid(row=0, column=0, sticky='nsew')
+        self._text.grid(row=0, column=1, sticky='nsew')
+        vsb.grid(row=0, column=2, sticky='ns')
+        hsb.grid(row=1, column=1, sticky='ew')
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+        self._vsb = vsb
+
+    def _sync_scroll(self, first: str, last: str) -> None:
+        self._vsb.set(first, last)
+        self._lineno.yview_moveto(first)
+
+    def _yview(self, *args) -> None:
+        self._text.yview(*args)
+        self._lineno.yview(*args)
+
+    def configure(self, **kwargs) -> None:  # type: ignore[override]
+        state = kwargs.pop('state', None)
+        if state is not None:
+            self._text.configure(state=state)
+        if kwargs:
+            super().configure(**kwargs)
+
+    def delete(self, index1: str, index2: str) -> None:
+        self._text.delete(index1, index2)
+
+    def insert(self, index: str, chars: str) -> None:
+        self._text.insert(index, chars)
+        self._update_linenos()
+
+    def _update_linenos(self) -> None:
+        count = int(self._text.index('end-1c').split('.')[0])
+        width = max(len(str(count)), 3)
+        numbers = '\n'.join(str(i) for i in range(1, count + 1))
+        self._lineno.configure(state='normal', width=width + 1)
+        self._lineno.delete('1.0', 'end')
+        self._lineno.insert('1.0', numbers)
+        self._lineno.configure(state='disabled')
 
 
 class HistoryWindow(tk.Toplevel):
@@ -149,8 +215,8 @@ class HistoryWindow(tk.Toplevel):
         detail_nb = ttk.Notebook(self)
         detail_nb.pack(fill='both', expand=True, padx=8, pady=(4, 8))
 
-        self._stdout_text = ScrolledText(detail_nb, wrap='none', height=10, state='disabled')
-        self._stderr_text = ScrolledText(detail_nb, wrap='none', height=10, state='disabled')
+        self._stdout_text = _LineNumberedText(detail_nb, wrap='none', height=10, state='disabled')
+        self._stderr_text = _LineNumberedText(detail_nb, wrap='none', height=10, state='disabled')
         detail_nb.add(self._stdout_text, text='標準出力 (stdout)')
         detail_nb.add(self._stderr_text, text='標準エラー (stderr)')
 
@@ -375,7 +441,7 @@ class HistoryWindow(tk.Toplevel):
                 parent=self,
             )
 
-    def _set_text(self, widget: ScrolledText, content: str) -> None:
+    def _set_text(self, widget: _LineNumberedText, content: str) -> None:
         widget.configure(state='normal')
         widget.delete('1.0', 'end')
         widget.insert('1.0', content or '(出力なし)')
