@@ -9,4 +9,4 @@
 *.spec
 *.log
 .vscode
-history*
+/data/history*
