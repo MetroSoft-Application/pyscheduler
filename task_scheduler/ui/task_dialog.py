@@ -12,6 +12,7 @@ from ..models import (
     SCHEDULE_TYPES,
     WEEKDAY_LABELS,
     TaskDefinition,
+    schedule_summary,
 )
 
 
@@ -312,6 +313,8 @@ class TaskDialog(tk.Toplevel):
 
     def _build_chain_frame(self, f: ttk.Frame) -> None:
         task_names = [t.name for t in self._chain_tasks]
+        # 名前 -> TaskDefinition のマップ
+        _name_to_task = {t.name: t for t in self._chain_tasks}
 
         row1 = ttk.Frame(f)
         row1.pack(fill='x', pady=4)
@@ -328,6 +331,22 @@ class TaskDialog(tk.Toplevel):
             ttk.Label(row1, text='(登録済みタスクがありません)', foreground='gray').pack(
                 side='left', padx=6
             )
+
+        # 前提タスクのスケジュール概要表示ラベル
+        self._chain_ref_sched_var = tk.StringVar()
+        ref_label = ttk.Label(row1, textvariable=self._chain_ref_sched_var, foreground='gray')
+        ref_label.pack(side='left', padx=(10, 0))
+
+        def _update_ref_sched(*_):
+            name = self._chain_task_var.get()
+            t = _name_to_task.get(name)
+            if t:
+                self._chain_ref_sched_var.set(f'({schedule_summary(t.schedule)})')
+            else:
+                self._chain_ref_sched_var.set('')
+
+        self._chain_task_var.trace_add('write', _update_ref_sched)
+        _update_ref_sched()  # 初期表示
 
         row2 = ttk.Frame(f)
         row2.pack(fill='x', pady=4)
