@@ -39,11 +39,31 @@ def _trigger_label(trigger: str | None) -> str:
     return '手動'
 
 
+# ソート用: カラムの値を比較可能な型に変換するキー関数
+def _sort_key_for(col: str, value: object) -> object:
+    s = str(value)
+    if col in ('started_at', 'finished_at'):
+        return s  # ISO8601 なので文字列比較で正しくソートできる
+    if col == 'duration':
+        try:
+            return float(s.rstrip('s')) if s not in ('-', '') else -1.0
+        except ValueError:
+            return -1.0
+    if col in ('exit_code', 'attempt'):
+        try:
+            return int(s)
+        except ValueError:
+            return -1
+    return s
+
+
 class _LineNumberedText(ttk.Frame):
     """行番号ガターを持つテキスト表示ウィジェット"""
 
     def __init__(self, master: tk.Misc, **kwargs) -> None:
         super().__init__(master)
+        # state='disabled' は構築後に適用する（構築時に渡すとフォーカスが当たらなくなる）
+        initial_state = kwargs.pop('state', 'normal')
         vsb = ttk.Scrollbar(self, orient='vertical')
         hsb = ttk.Scrollbar(self, orient='horizontal')
         self._lineno = tk.Text(
@@ -62,8 +82,11 @@ class _LineNumberedText(ttk.Frame):
             self,
             yscrollcommand=self._sync_scroll,
             xscrollcommand=hsb.set,
+            takefocus=True,
             **kwargs,
         )
+        if initial_state != 'normal':
+            self._text.configure(state=initial_state)
         vsb.configure(command=self._yview)
         hsb.configure(command=self._text.xview)
         self._lineno.grid(row=0, column=0, sticky='nsew')
@@ -73,6 +96,14 @@ class _LineNumberedText(ttk.Frame):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
         self._vsb = vsb
+        # クリックでフォーカスを当てる（disabled 状態でも動作させるため）
+        self._text.bind('<Button-1>', lambda e: self._text.focus_set())
+        self._lineno.bind('<Button-1>', lambda e: self._text.focus_set())
+        self.bind('<Button-1>', lambda e: self._text.focus_set())
+        self._text.bind('<Control-c>', self._copy_text)
+        self._text.bind('<Control-C>', self._copy_text)
+        self._text.bind('<Control-a>', self._select_all_text)
+        self._text.bind('<Control-A>', self._select_all_text)
 
     def _sync_scroll(self, first: str, last: str) -> None:
         self._vsb.set(first, last)
@@ -104,6 +135,19 @@ class _LineNumberedText(ttk.Frame):
         self._lineno.delete('1.0', 'end')
         self._lineno.insert('1.0', numbers)
         self._lineno.configure(state='disabled')
+
+    def _copy_text(self, _event: tk.Event) -> str:
+        try:
+            text = self._text.get('sel.first', 'sel.last')
+            self._text.clipboard_clear()
+            self._text.clipboard_append(text)
+        except tk.TclError:
+            pass
+        return 'break'
+
+    def _select_all_text(self, _event: tk.Event) -> str:
+        self._text.tag_add('sel', '1.0', 'end-1c')
+        return 'break'
 
 
 class HistoryWindow(tk.Toplevel):
@@ -168,16 +212,16 @@ class HistoryWindow(tk.Toplevel):
             cols = ('task_name', 'started_at', 'finished_at', 'status', 'exit_code', 'duration', 'trigger', 'attempt')
         else:
             cols = ('started_at', 'finished_at', 'status', 'exit_code', 'duration', 'trigger', 'attempt')
+        _COL_LABELS: dict[str, str] = {
+            'task_name': 'タスク名', 'started_at': '開始時刻', 'finished_at': '終了時刻',
+            'status': '状態', 'exit_code': '終了コード', 'duration': '所要時間',
+            'trigger': 'トリガー', 'attempt': '試行回数',
+        }
+        self._col_labels = _COL_LABELS
         self._tree = ttk.Treeview(top, columns=cols, show='headings', selectmode='extended')
-        if self._show_task_name:
-            self._tree.heading('task_name', text='タスク名')
-        self._tree.heading('started_at', text='開始時刻')
-        self._tree.heading('finished_at', text='終了時刻')
-        self._tree.heading('status', text='状態')
-        self._tree.heading('exit_code', text='終了コード')
-        self._tree.heading('duration', text='所要時間')
-        self._tree.heading('trigger', text='トリガー')
-        self._tree.heading('attempt', text='試行回数')
+        for col in cols:
+            self._tree.heading(col, text=_COL_LABELS.get(col, col),
+                               command=lambda c=col: self._sort_by(c))
 
         if self._show_task_name:
             self._tree.column('task_name', width=200, minwidth=160)
@@ -200,6 +244,9 @@ class HistoryWindow(tk.Toplevel):
         self._tree.tag_configure('killed', foreground='#666600')
         self._tree.tag_configure('running', foreground='#0044bb')
         self._tree.tag_configure('unknown', foreground='#888888')
+
+        self._sort_col: str | None = None
+        self._sort_asc: bool = True
 
         self._tree.bind('<<TreeviewSelect>>', self._on_select)
         self._tree.bind('<Delete>', self._on_delete_key)
@@ -317,6 +364,24 @@ class HistoryWindow(tk.Toplevel):
         self._set_text(self._stdout_text, f'(履歴の読込に失敗しました: {message})')
         self._set_text(self._stderr_text, '(履歴の読込に失敗したため詳細は表示できません)')
         self._update_delete_button_state()
+
+    def _sort_by(self, col: str) -> None:
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+
+        # ヘッダのソート方向表示のみ更新（command は _build_ui で設定済みのため再設定しない）
+        for c in self._tree['columns']:
+            text = self._col_labels.get(c, c)
+            arrow = (' ▲' if self._sort_asc else ' ▼') if c == self._sort_col else ''
+            self._tree.heading(c, text=text + arrow)
+
+        data = [(self._tree.set(iid, col), iid) for iid in self._tree.get_children('')]
+        data.sort(key=lambda x: _sort_key_for(col, x[0]), reverse=not self._sort_asc)
+        for i, (_, iid) in enumerate(data):
+            self._tree.move(iid, '', i)
 
     def _on_select(self, _event: tk.Event) -> None:
         self._update_delete_button_state()

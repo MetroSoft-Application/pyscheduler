@@ -63,6 +63,8 @@ class MainWindow(tk.Tk):
         self._ui_call_queue: queue.Queue[Callable[[], None]] = queue.Queue()
         self._refresh_in_progress = False
         self._refresh_pending = False
+        self._sort_col: str | None = None
+        self._sort_asc: bool = True
 
         # ウィンドウを閉じたときは非表示にする（トレイに残る）
         self.protocol('WM_DELETE_WINDOW', self.withdraw)
@@ -70,10 +72,41 @@ class MainWindow(tk.Tk):
         # 状態変化時に UI を更新するコールバックを登録
         self._executor.on_status_change = lambda _task_id: self.run_on_ui_thread(self._on_status_changed)
 
+        # アプリ全体の Treeview に Ctrl+A / Ctrl+C を一括適用
+        self._bind_treeview_shortcuts()
+
         self._build_ui()
         self._start_ui_queue_pump()
         self._trigger_background_refresh(debounce_ms=0)
         self._start_poll()
+
+    def _bind_treeview_shortcuts(self) -> None:
+        def _select_all(event: tk.Event) -> str:
+            tree: ttk.Treeview = event.widget
+            tree.selection_set(tree.get_children(''))
+            return 'break'
+
+        def _copy(event: tk.Event) -> str:
+            tree: ttk.Treeview = event.widget
+            sel = set(tree.selection())
+            if not sel:
+                return 'break'
+            cols = tree['columns']
+            header = '\t'.join(tree.heading(c)['text'].rstrip(' ▲▼') for c in cols)
+            rows = [
+                '\t'.join(str(tree.set(iid, c)) for c in cols)
+                for iid in tree.get_children('')
+                if iid in sel
+            ]
+            if rows:
+                tree.clipboard_clear()
+                tree.clipboard_append(header + '\n' + '\n'.join(rows))
+            return 'break'
+
+        self.bind_class('Treeview', '<Control-a>', _select_all)
+        self.bind_class('Treeview', '<Control-A>', _select_all)
+        self.bind_class('Treeview', '<Control-c>', _copy)
+        self.bind_class('Treeview', '<Control-C>', _copy)
 
     def set_quit_callback(self, cb: Callable[[], None]) -> None:
         self._on_quit = cb
@@ -160,7 +193,7 @@ class MainWindow(tk.Tk):
         paned.add(task_frame, weight=3)
 
         cols = [c[0] for c in self._COL_DEFS]
-        self._tree = ttk.Treeview(task_frame, columns=cols, show='headings', selectmode='browse')
+        self._tree = ttk.Treeview(task_frame, columns=cols, show='headings', selectmode='extended')
         for col_id, heading, width in self._COL_DEFS:
             self._tree.heading(col_id, text=heading, command=lambda c=col_id: self._sort_by(c))
             self._tree.column(col_id, width=width, minwidth=60)
@@ -210,7 +243,7 @@ class MainWindow(tk.Tk):
 
         hcols = [c[0] for c in self._HIST_COL_DEFS]
         self._hist_tree = ttk.Treeview(hist_frame, columns=hcols, show='headings',
-                                       selectmode='browse', height=8)
+                                       selectmode='extended', height=8)
         for col_id, heading, width in self._HIST_COL_DEFS:
             self._hist_tree.heading(col_id, text=heading)
             self._hist_tree.column(col_id, width=width, minwidth=50)
@@ -239,7 +272,8 @@ class MainWindow(tk.Tk):
             tasks = self._storage.list_tasks()
         if last_hist_all is None:
             last_hist_all = self._storage.get_last_history_all()
-        sel_id = self._selected_task_id()
+        prev_sel = set(self._tree.selection())
+        prev_focus = self._tree.focus()
 
         self._tree.delete(*self._tree.get_children())
         for task in tasks:
@@ -278,15 +312,18 @@ class MainWindow(tk.Tk):
                 tags=(tag,),
             )
 
-        # 選択を復元
-        if sel_id and self._tree.exists(sel_id):
-            self._tree.selection_set(sel_id)
-            self._tree.focus(sel_id)
+        # 複数選択状態を復元（Ctrl+A による全選択を含む）
+        valid_sel = [iid for iid in prev_sel if self._tree.exists(iid)]
+        if valid_sel:
+            self._tree.selection_set(valid_sel)
+        if prev_focus and self._tree.exists(prev_focus):
+            self._tree.focus(prev_focus)
 
         self._update_btn_states()
         total = len(tasks)
         running_count = sum(1 for t in tasks if self._pid_store.is_running(t.id))
         self._status_var.set(f'タスク合計: {total}件  実行中: {running_count}件')
+        self._apply_sort()
 
     def _refresh_history_panel(
         self,
@@ -387,8 +424,9 @@ class MainWindow(tk.Tk):
         row = self._hist_tree.identify_row(event.y)
         if not row:
             return
-        self._hist_tree.selection_set(row)
-        self._hist_tree.focus(row)
+        # Ctrl 修飾子ありは複数選択操作のため HistoryWindow を開かない
+        if int(event.state) & 0x4:
+            return
         self._open_history_from_summary(row)
 
     def _on_hist_tree_enter(self, _event: tk.Event) -> None:
@@ -498,8 +536,23 @@ class MainWindow(tk.Tk):
             self.after(3000, self._poll)
 
     def _sort_by(self, col: str) -> None:
-        items = [(self._tree.set(k, col), k) for k in self._tree.get_children()]
-        items.sort()
+        """ヘッダクリック時のソート（昇降順トグルあり）"""
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._apply_sort()
+
+    def _apply_sort(self) -> None:
+        """現在のソート状態をツリーに適用する（リフレッシュ後の再適用にも使用）"""
+        if self._sort_col is None:
+            return
+        for col_id, heading, _ in self._COL_DEFS:
+            arrow = (' ▲' if self._sort_asc else ' ▼') if col_id == self._sort_col else ''
+            self._tree.heading(col_id, text=heading + arrow)
+        items = [(self._tree.set(k, self._sort_col), k) for k in self._tree.get_children()]
+        items.sort(reverse=not self._sort_asc)
         for idx, (_, k) in enumerate(items):
             self._tree.move(k, '', idx)
 
@@ -642,6 +695,10 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------ ユーティリティ
 
     def _selected_task_id(self) -> str | None:
+        # フォーカス行を優先する（extended モードで複数選択中でも操作対象が明確になる）
+        focused = self._tree.focus()
+        if focused:
+            return focused
         sel = self._tree.selection()
         return sel[0] if sel else None
 
