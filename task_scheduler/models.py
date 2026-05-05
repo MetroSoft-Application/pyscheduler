@@ -63,6 +63,7 @@ class PidEntry:
     started_at: str
     history_id: str
     task_name: str
+    proc_create_time: float | None = None  # プロセス生成時刻 (unix epoch), PID 再利用検出に使用
 
 
 def schedule_summary(schedule: dict[str, Any]) -> str:

@@ -31,6 +31,14 @@ _STATUS_TAGS: dict[str, str] = {
 }
 
 
+def _trigger_label(trigger: str | None) -> str:
+    if trigger == 'scheduler':
+        return 'スケジューラ'
+    if trigger == 'chain':
+        return 'チェーン'
+    return '手動'
+
+
 class _LineNumberedText(ttk.Frame):
     """行番号ガターを持つテキスト表示ウィジェット"""
 
@@ -270,7 +278,7 @@ class HistoryWindow(tk.Toplevel):
                     label,
                     entry.exit_code if entry.exit_code is not None else '-',
                     dur,
-                    'スケジューラ' if entry.trigger == 'scheduler' else '手動',
+                    _trigger_label(entry.trigger),
                     entry.attempt_count,
                 )
             else:
@@ -280,7 +288,7 @@ class HistoryWindow(tk.Toplevel):
                     label,
                     entry.exit_code if entry.exit_code is not None else '-',
                     dur,
-                    'スケジューラ' if entry.trigger == 'scheduler' else '手動',
+                    _trigger_label(entry.trigger),
                     entry.attempt_count,
                 )
             self._tree.insert(

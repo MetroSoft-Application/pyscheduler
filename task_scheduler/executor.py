@@ -332,6 +332,13 @@ class TaskExecutor:
             return 'failed', None, '', str(exc)
 
         # PID を永続化
+        # プロセス生成時刻を取得 (PID 再利用検出のため)
+        try:
+            import psutil as _psutil
+            _proc_create_time: float | None = _psutil.Process(proc.pid).create_time()
+        except Exception:
+            _proc_create_time = None
+
         self._pid_store.register(
             task.id,
             PidEntry(
@@ -339,6 +346,7 @@ class TaskExecutor:
                 started_at=_now_str(),
                 history_id=history_id,
                 task_name=task.name,
+                proc_create_time=_proc_create_time,
             ),
         )
         if self.on_status_change:
@@ -495,6 +503,13 @@ class TaskExecutor:
                 exit_code = self._wait_for_exit_code(exit_code_path, timeout_seconds=1.0)
                 return 'failed', exit_code, '', message
 
+            # プロセス生成時刻を取得 (PID 再利用検出のため)
+            try:
+                import psutil as _psutil
+                _elev_create_time: float | None = _psutil.Process(target_pid).create_time()
+            except Exception:
+                _elev_create_time = None
+
             self._pid_store.register(
                 task.id,
                 PidEntry(
@@ -502,6 +517,7 @@ class TaskExecutor:
                     started_at=_now_str(),
                     history_id=history_id,
                     task_name=task.name,
+                    proc_create_time=_elev_create_time,
                 ),
             )
             if self.on_status_change:
@@ -659,15 +675,20 @@ class TaskExecutor:
 
     def startup_cleanup(self) -> None:
         """起動時に前回セッションの孤立プロセスを処理する。
-        - 死亡済みプロセス: 履歴を unknown_exit で閉じる
+        - 死亡済みプロセス (PID 再利用含む): 履歴を unknown_exit で閉じる
         - 生存プロセス: 監視スレッドを起動して完了時に履歴を更新する
+        - DB に残った幽霊 running レコード: unknown_exit で閉じる
         """
         dead = self._pid_store.cleanup_dead_pids()
         for task_id, entry in dead.items():
             self._close_orphan_history(task_id, entry, 'unknown_exit')
 
+        # 生存プロセスを監視しつつ、その history_id を収集する
+        live_history_ids: set[str] = set()
         for task_id, entry in self._pid_store.get_all().items():
-            if pid_alive(entry.pid):
+            from .pid_store import pid_alive
+            if pid_alive(entry.pid, entry.proc_create_time):
+                live_history_ids.add(entry.history_id)
                 t = threading.Thread(
                     target=self._monitor_orphan,
                     args=(task_id, entry),
@@ -676,11 +697,26 @@ class TaskExecutor:
                 )
                 t.start()
 
+        # DB 上で running のまま残っている幽霊レコードを閉じる
+        self._storage.close_stale_running_entries(live_history_ids, _now_str())
+
     def _monitor_orphan(self, task_id: str, entry: PidEntry) -> None:
         """孤立プロセスの終了を監視し、履歴を更新する"""
         import psutil
         try:
             proc = psutil.Process(entry.pid)
+            # PID 再利用検出: create_time が記録値と大幅に異なれば別プロセスと判断して即終了
+            if entry.proc_create_time is not None:
+                try:
+                    if abs(proc.create_time() - entry.proc_create_time) > 2.0:
+                        # 別プロセスを誤って監視しないようスキップ
+                        self._pid_store.unregister(task_id)
+                        self._close_orphan_history(task_id, entry, 'unknown_exit')
+                        if self.on_status_change:
+                            self.on_status_change(task_id)
+                        return
+                except Exception:
+                    pass
             proc.wait()
         except Exception:
             pass

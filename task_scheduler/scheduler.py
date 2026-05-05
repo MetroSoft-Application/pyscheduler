@@ -191,14 +191,14 @@ class TaskScheduler:
 
     def _add_job(self, task: TaskDefinition) -> None:
         if task.schedule.get('type') == 'chain':
-            # chain はイベント驱動のため APScheduler には登録しない
+            # chain はイベント駆動のため APScheduler には登録しない
             # fallback_time が設定されている場合はデイリークロンも追加する
             fallback_time = str(task.schedule.get('fallback_time', '')).strip()
             if fallback_time:
                 trigger = self._make_fallback_trigger(fallback_time)
                 if trigger is not None:
                     self._scheduler.add_job(
-                        func=self._run_task,
+                        func=self._run_task_fallback,
                         trigger=trigger,
                         args=[task.id],
                         id=f'{task.id}__fallback',
@@ -311,6 +311,15 @@ class TaskScheduler:
                 return None
 
         return None
+
+    def _run_task_fallback(self, task_id: str) -> None:
+        """fallback_time から呼ばれるジョブ。当日中にすでに実行されていればスキップする。"""
+        today = datetime.now().strftime('%Y-%m-%d')
+        recent = self._storage.list_history(task_id, limit=1)
+        if recent and recent[0].started_at.startswith(today):
+            # 当日中に chain または手動で実行済みのためスキップ
+            return
+        self._run_task(task_id)
 
     def _on_task_success(self, task_id: str) -> None:
         """後方互換のため残存。実処理は _on_task_complete が担う。"""

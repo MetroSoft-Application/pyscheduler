@@ -158,6 +158,28 @@ class Storage:
         """history_id が一致する行を更新する"""
         self._upsert_history(entry)
 
+    def close_stale_running_entries(
+        self, known_history_ids: set[str], finished_at: str
+    ) -> int:
+        """known_history_ids に含まれない status='running' のレコードを unknown_exit で閉じる。
+        アプリクラッシュ後の幽霊レコードを起動時にクリーンアップするために使用する。
+        更新したレコード件数を返す。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM history_summaries WHERE status = 'running'"
+            ).fetchall()
+            stale = [row['id'] for row in rows if row['id'] not in known_history_ids]
+            if not stale:
+                return 0
+            self._conn.execute('BEGIN')
+            self._conn.executemany(
+                "UPDATE history_summaries SET status = 'unknown_exit', finished_at = ? WHERE id = ?",
+                [(finished_at, hid) for hid in stale],
+            )
+            self._conn.execute('COMMIT')
+        return len(stale)
+
     def _upsert_history(self, entry: RunHistoryEntry) -> None:
         has_stdout = bool(entry.stdout) or entry.has_stdout
         has_stderr = bool(entry.stderr) or entry.has_stderr
