@@ -325,8 +325,11 @@ class TaskScheduler:
         """後方互換のため残存。実処理は _on_task_complete が担う。"""
         pass
 
-    def _on_task_complete(self, task_id: str, final_status: str) -> None:
+    def _on_task_complete(self, task_id: str, final_status: str, trigger: str) -> None:
         """あるタスクが完了したとき、on_condition に合致するチェーンタスクを起動する"""
+        if trigger == 'manual':
+            return
+
         # 失敗とみなすステータス
         _FAILED_STATUSES = frozenset({'failed', 'timeout', 'unknown_exit'})
 

@@ -198,8 +198,8 @@ class TaskExecutor:
         self.on_status_change: Callable[[str], None] | None = None
         # 成功完了時に通知するコールバック(task_id を引数に受け取る)
         self.on_task_success: Callable[[str], None] | None = None
-        # タスク完了時に通知するコールバック(task_id, final_status を引数に受け取る)
-        self.on_task_complete: Callable[[str, str], None] | None = None
+        # タスク完了時に通知するコールバック(task_id, final_status, trigger を引数に受け取る)
+        self.on_task_complete: Callable[[str, str, str], None] | None = None
 
     def kill_task(self, task_id: str) -> bool:
         """実行中タスクを停止する"""
@@ -286,7 +286,7 @@ class TaskExecutor:
             self.on_task_success(task.id)
 
         if self.on_task_complete:
-            self.on_task_complete(task.id, final_status)
+            self.on_task_complete(task.id, final_status, trigger)
 
     def _run_once(
         self,
